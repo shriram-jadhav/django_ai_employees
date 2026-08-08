@@ -1,10 +1,8 @@
 from google import genai
 from google.genai import types
 from django.conf import settings
-
-from .tools import get_order_details, get_refund_history, check_delivery_status, get_customer_risk_profile, search_knowledge_base
+from .tools import get_order_details, get_refund_history, check_delivery_status, get_customer_risk_profile
 from .models import Conversation, Message, AgentLog
-# from .event_queue import DONE, publish
 
 
 # Initialize Gemini client
@@ -14,7 +12,6 @@ gemini_model = settings.GEMINI_MODEL
 
 
 # SUPPORT SYSTEM PROMPT --> Maya's job description
-
 SUPPORT_SYSTEM_PROMPT = """
 You are Maya, a customer support agent at CoolBreeze AC.
 You help customers with issues related to their AC orders.
@@ -35,8 +32,6 @@ Important rules:
 - Always check order details first before responding
 - Never approve or deny a refund yourself
 - If refund decision is needed — tell customer you are checking with your team
-- Never use bold text, bullet points or any markdown formatting. Plain text only.
-- Keep replies concise and conversational. Maximum 3-4 sentences. No long paragraphs.
 """
 
 
@@ -88,9 +83,7 @@ Important:
 - Look for patterns — not isolated incidents
 """
 
-
 # SUPPORT TOOLS --> Tool schemas, that ai agents will read
-
 SUPPORT_TOOLS = types.Tool(function_declarations=[
     types.FunctionDeclaration(
         name="get_order_details",
@@ -140,20 +133,6 @@ SUPPORT_TOOLS = types.Tool(function_declarations=[
             required=["case_summary"]
         )
     ),
-    types.FunctionDeclaration(
-        name="search_knowledge_base",
-        description="Search CoolBreeze AC company documents including refund policy, warranty policy, and product FAQs. Use this when customer asks about company policies, warranty coverage, warranty claims, refund eligibility, or any general product information that requires accurate company documentation.",
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "query": types.Schema(
-                    type=types.Type.STRING,
-                    description="The search query to find relevant information from company documents. Be specific — for example 'refund eligibility within 30 days' instead of just 'refund'."
-                )
-            },
-            required=["query"]
-        )
-    ),
 ])
 
 
@@ -191,32 +170,29 @@ RISK_TOOLS = types.Tool(function_declarations=[
 def execute_tool(tool_name, tool_input, conversation_id=None):
     if tool_name == "get_order_details":
         return get_order_details(tool_input["order_id"])
-
+    
     if tool_name == "get_refund_history":
         return get_refund_history(tool_input["user_id"])
-
+    
     if tool_name == "check_delivery_status":
         return check_delivery_status(tool_input["tracking_number"], tool_input["carrier"])
-
+    
     if tool_name == "escalate_to_manager":
         case_summary = tool_input["case_summary"]
         print("escalating to manager=====>", case_summary)
         decision = run_manager_agent(case_summary, conversation_id)
         print("decision===>", decision)
         return decision
-
+    
     if tool_name == 'assess_fraud_risk':
         user_id = tool_input['user_id']
         print("Consulting risk agent for user==>", user_id)
         verdict = run_risk_agent(user_id, conversation_id)
         print("risk verdict==>", verdict)
         return verdict
-
+    
     if tool_name == 'get_customer_risk_profile':
         return get_customer_risk_profile(tool_input['user_id'])
-
-    if tool_name == "search_knowledge_base":
-        return search_knowledge_base(tool_input["query"])
 
 
 def _to_gemini_role(role):
@@ -254,16 +230,11 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
             for fc in function_calls:
                 fc_args = dict(fc.args)
 
-                event = {"type": "tool_call", "message": f"Calling tool {fc.name} with {fc_args}"}
-                publish(conversation_id, event)
                 # log tool call
                 AgentLog.objects.create(conversation=conv, event_type="tool_call", message=f"Calling tool {fc.name} with {fc_args}")
 
                 # execute the tool
                 result = execute_tool(fc.name, fc_args, conversation_id)
-
-                event = {"type": "tool_result", "message": f"{fc.name} returned: {str(result)[:200]}"}
-                publish(conversation_id, event)
 
                 # log tool result
                 AgentLog.objects.create(conversation=conv, event_type="tool_result", message=f"{fc.name} returned: {str(result)[:200]}")
@@ -278,26 +249,16 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
             conversation_messages.append(types.Content(role="user", parts=tool_result))
 
         else:
-            final_reply = response.text
-            # Publish final reply
-            event = {"type": "final", "message": final_reply}
-            publish(conversation_id, event)
             # log final reply
+            final_reply = response.text
             AgentLog.objects.create(conversation=conv, event_type="final", message=final_reply)
-
-            publish(conversation_id, DONE)
-            print("Running raw implementation")
             return final_reply
-
+        
 
 def run_manager_agent(case_summary, conversation_id):
     conv = Conversation.objects.get(id=conversation_id)
-
-    event = {"type": "manager", "message": f"Case received for review: {case_summary[:200]}"}
-    publish(conversation_id, event)
-
     AgentLog.objects.create(conversation=conv, event_type="manager", message=f"Case received for review: {case_summary[:200]}")
-
+    
     manager_messages = [
         types.Content(role="user", parts=[types.Part.from_text(text=case_summary)])  # user is task giver
     ]
@@ -321,12 +282,9 @@ def run_manager_agent(case_summary, conversation_id):
             for fc in function_calls:
                 fc_args = dict(fc.args)
 
-                event = {"type": "manager", "message": "Consulting risk agent for fraud assessment..."}
-                publish(conversation_id, event)
-
                 # log consulting risk agent
                 AgentLog.objects.create(conversation=conv, event_type="manager", message="Consulting risk agent for fraud assessment...")
-
+                
                 result = execute_tool(fc.name, fc_args, conversation_id)
 
                 tool_result.append(
@@ -335,26 +293,17 @@ def run_manager_agent(case_summary, conversation_id):
 
             manager_messages.append(candidate.content)
             manager_messages.append(types.Content(role="user", parts=tool_result))
-
         else:
             decision = response.text
-
-            event = {"type": "manager", "message": f"Decision: {decision[:200]}"}
-            publish(conversation_id, event)
-
             AgentLog.objects.create(conversation=conv, event_type="manager", message=f"Decision: {decision[:200]}")
             return decision
 
 
 def run_risk_agent(user_id, conversation_id):
     conv = Conversation.objects.get(id=conversation_id)
-
-    event = {"type": "risk", "message": f"Starting fraud assessment for user {user_id}"}
-    publish(conversation_id, event)
-
     # log assessment started
     AgentLog.objects.create(conversation=conv, event_type="risk", message=f"Starting fraud assessment for user {user_id}")
-
+    
     risk_messages = [
         types.Content(
             role="user",
@@ -383,12 +332,13 @@ def run_risk_agent(user_id, conversation_id):
             for fc in function_calls:
                 fc_args = dict(fc.args)
 
-                event = {"type": "risk", "message": f"Calling {fc.name} to get customer risk profile..."}
-                publish(conversation_id, event)
-
                 AgentLog.objects.create(conversation=conv, event_type="risk", message=f"Calling {fc.name} to get customer risk profile...")
+                
+                print("risk tool call==>", fc.name)
+                print("risk tool input===>", fc_args)
 
                 result = execute_tool(fc.name, fc_args, conversation_id)
+                print('risk tool result==>', result)
 
                 tool_result.append(
                     types.Part.from_function_response(name=fc.name, response={"result": str(result)})
@@ -396,12 +346,7 @@ def run_risk_agent(user_id, conversation_id):
 
             risk_messages.append(candidate.content)
             risk_messages.append(types.Content(role="user", parts=tool_result))
-
         else:
             verdict = response.text
-
-            event = {"type": "risk", "message": f"Verdict: {verdict[:200]}"}
-            publish(conversation_id, event)
-
             AgentLog.objects.create(conversation=conv, event_type="risk", message=f"Verdict: {verdict[:200]}")
             return verdict
