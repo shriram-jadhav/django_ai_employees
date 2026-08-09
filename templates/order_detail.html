@@ -399,7 +399,10 @@
       }
 
       function hideTyping() {
-        document.getElementById("typing-indicator").remove();
+        const indicator = document.getElementById("typing-indicator");
+        if (indicator) {
+          indicator.remove();
+        }
       }
 
       function showChat() {

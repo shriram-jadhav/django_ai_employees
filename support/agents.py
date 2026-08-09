@@ -3,6 +3,7 @@ from google.genai import types
 from django.conf import settings
 from .tools import get_order_details, get_refund_history, check_delivery_status, get_customer_risk_profile
 from .models import Conversation, Message, AgentLog
+from .event_queue import DONE, publish
 
 
 # Initialize Gemini client
@@ -32,9 +33,6 @@ Important rules:
 - Always check order details first before responding
 - Never approve or deny a refund yourself
 - If refund decision is needed — tell customer you are checking with your team
-- Never use bold text, bullet points or any markdown formatting. Plain text only.
-- Keep replies concie and conversational as if talking to a real human.
-- Maximum 3-4 sentences. No long paragraphs.
 """
 
 
@@ -233,12 +231,16 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
             for fc in function_calls:
                 fc_args = dict(fc.args)
 
+                event = {"type": "tool_call", "message": f"Calling tool {fc.name} with {fc_args}"}
+                publish(conversation_id, event)
                 # log tool call
                 AgentLog.objects.create(conversation=conv, event_type="tool_call", message=f"Calling tool {fc.name} with {fc_args}")
 
                 # execute the tool
                 result = execute_tool(fc.name, fc_args, conversation_id)
 
+                event = {"type": "tool_result", "message": f"{fc.name} returned: {str(result)[:200]}"}
+                publish(conversation_id, event)
                 # log tool result
                 AgentLog.objects.create(conversation=conv, event_type="tool_result", message=f"{fc.name} returned: {str(result)[:200]}")
                 print('executing tool==>', fc.name)
@@ -252,14 +254,22 @@ def run_support_agent(user_message, conversation_id, order_id, user_id):
             conversation_messages.append(types.Content(role="user", parts=tool_result))
 
         else:
-            # log final reply
             final_reply = response.text
+            # Publish final reply
+            event = {"type": "final", "message": final_reply}
+            publish(conversation_id, event)
+            # log final reply
             AgentLog.objects.create(conversation=conv, event_type="final", message=final_reply)
+
+            publish(conversation_id, DONE)
             return final_reply
         
 
 def run_manager_agent(case_summary, conversation_id):
     conv = Conversation.objects.get(id=conversation_id)
+
+    event = {"type": "manager", "message": f"Case received for review: {case_summary[:200]}"}
+    publish(conversation_id, event)
     AgentLog.objects.create(conversation=conv, event_type="manager", message=f"Case received for review: {case_summary[:200]}")
     
     manager_messages = [
@@ -285,6 +295,8 @@ def run_manager_agent(case_summary, conversation_id):
             for fc in function_calls:
                 fc_args = dict(fc.args)
 
+                event = {"type": "manager", "message": "Consulting risk agent for fraud assessment..."}
+                publish(conversation_id, event)
                 # log consulting risk agent
                 AgentLog.objects.create(conversation=conv, event_type="manager", message="Consulting risk agent for fraud assessment...")
                 
@@ -298,12 +310,18 @@ def run_manager_agent(case_summary, conversation_id):
             manager_messages.append(types.Content(role="user", parts=tool_result))
         else:
             decision = response.text
+
+            event = {"type": "manager", "message": f"Decision: {decision[:200]}"}
+            publish(conversation_id, event)
             AgentLog.objects.create(conversation=conv, event_type="manager", message=f"Decision: {decision[:200]}")
             return decision
 
 
 def run_risk_agent(user_id, conversation_id):
     conv = Conversation.objects.get(id=conversation_id)
+
+    event = {"type": "risk", "message": f"Starting fraud assessment for user {user_id}"}
+    publish(conversation_id, event)
     # log assessment started
     AgentLog.objects.create(conversation=conv, event_type="risk", message=f"Starting fraud assessment for user {user_id}")
     
@@ -335,6 +353,8 @@ def run_risk_agent(user_id, conversation_id):
             for fc in function_calls:
                 fc_args = dict(fc.args)
 
+                event = {"type": "risk", "message": f"Calling {fc.name} to get customer risk profile..."}
+                publish(conversation_id, event)
                 AgentLog.objects.create(conversation=conv, event_type="risk", message=f"Calling {fc.name} to get customer risk profile...")
                 
                 print("risk tool call==>", fc.name)
@@ -351,5 +371,8 @@ def run_risk_agent(user_id, conversation_id):
             risk_messages.append(types.Content(role="user", parts=tool_result))
         else:
             verdict = response.text
+
+            event = {"type": "risk", "message": f"Verdict: {verdict[:200]}"}
+            publish(conversation_id, event)
             AgentLog.objects.create(conversation=conv, event_type="risk", message=f"Verdict: {verdict[:200]}")
             return verdict
